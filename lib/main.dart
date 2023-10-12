@@ -1,4 +1,10 @@
+import 'dart:async';
+
+import 'package:background_downloader/background_downloader.dart';
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+enum ButtonState { download, cancel, pause, resume, reset }
 
 void main() {
   runApp(const MyApp());
@@ -7,46 +13,22 @@ void main() {
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
+      debugShowCheckedModeBanner: false,
+      title: 'cmed_task1',
       theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a blue toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
         useMaterial3: true,
       ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+      home: const MyHomePage(title: 'Home Screen'),
     );
   }
 }
 
 class MyHomePage extends StatefulWidget {
   const MyHomePage({super.key, required this.title});
-
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
 
   final String title;
 
@@ -55,17 +37,83 @@ class MyHomePage extends StatefulWidget {
 }
 
 class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+  final buttonTexts = ['Download', 'Cancel', 'Pause', 'Resume', 'Reset'];
 
-  void _incrementCounter() {
-    setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
+  ButtonState buttonState = ButtonState.download;
+  bool downloadWithError = false;
+  TaskStatus? downloadTaskStatus;
+  DownloadTask? backgroundDownloadTask;
+  StreamController<TaskProgressUpdate> progressUpdateStream = StreamController();
+
+  SharedPreferences? sharedPreferences;
+  bool isLoading = false;
+  String lastDownloadStatus = "";
+
+  Future<void> initData() async {
+    sharedPreferences = await SharedPreferences.getInstance();
+    lastDownloadStatus = sharedPreferences?.getString("last_download_status")??"N/A";
+
+    FileDownloader().configure(globalConfig: [
+      (Config.requestTimeout, const Duration(seconds: 100)),
+    ], androidConfig: [
+      (Config.useCacheDir, Config.whenAble),
+    ], iOSConfig: [
+      (Config.localize, {'Cancel': 'StopIt'}),
+    ]).then((result) => debugPrint('Configuration result = $result'));
+
+    FileDownloader().configure(globalConfig: [
+      (Config.requestTimeout, const Duration(seconds: 200)),
+    ], androidConfig: [
+      (Config.useCacheDir, Config.whenAble),
+    ], iOSConfig: [
+      (Config.localize, {'Cancel': 'StopIt'}),
+    ]).then((result) => debugPrint('Configuration result = $result'));
+
+    FileDownloader()
+        .registerCallbacks(taskNotificationTapCallback: myNotificationTapCallback)
+        .configureNotificationForGroup(
+          FileDownloader.defaultGroup,
+          running: const TaskNotification('Download {filename}', 'File: {filename} - {progress} - speed {networkSpeed} and {timeRemaining} remaining'),
+          complete: const TaskNotification('Download {filename}', 'Download complete'),
+          error: const TaskNotification('Download {filename}', 'Download failed'),
+          paused: const TaskNotification('Download {filename}', 'Paused with metadata {metadata}'),
+          progressBar: true,
+        )
+        .configureNotification(
+          complete: const TaskNotification('Download {filename}', 'Download complete'),
+          // tapOpensFile: false,
+        );
+
+    FileDownloader().updates.listen((update) {
+      switch (update) {
+        case TaskStatusUpdate _:
+          if (update.task == backgroundDownloadTask) {
+            buttonState = switch (update.status) { TaskStatus.running || TaskStatus.enqueued => ButtonState.pause, TaskStatus.paused => ButtonState.resume, _ => ButtonState.reset };
+            setState(() {
+              downloadTaskStatus = update.status;
+              sharedPreferences?.setString("last_download_status", lastDownloadStatus.toString());
+            });
+          }
+
+        case TaskProgressUpdate _:
+          progressUpdateStream.add(update); // pass on to widget for indicator
+      }
     });
+  }
+
+  @override
+  void initState() {
+    initData();
+    super.initState();
+  }
+
+  void myNotificationTapCallback(Task task, NotificationType notificationType) {
+    manageData(task);
+  }
+
+  manageData(var task) async {
+    final record = await FileDownloader().database.recordForId(task.taskId);
+    debugPrint("record: ${record?.toString()}");
   }
 
   @override
@@ -79,26 +127,56 @@ class _MyHomePageState extends State<MyHomePage> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: <Widget>[
-            const Row(
-              children: [
-                Text(
-                  'Your last download status:',
-                ),
-                SizedBox(
-                  width: 5,
-                ),
-                Text(
-                  'N/A',
-                ),
-              ],
-            ),
-            ElevatedButton(
-              onPressed: () {},
-              child: const Text("Download"),
-            ),
+             Text(
+               lastDownloadStatus,
+             ),
+            const SizedBox(height: 20),
+            Center(
+                child: ElevatedButton(
+              onPressed: processButtonPress,
+              child: Text(
+                'Download',
+                style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                      color: Colors.black,
+                      fontSize: 16,
+                    ),
+              ),
+            )),
           ],
         ),
       ),
     );
+  }
+
+  Future<void> processButtonPress() async {
+    switch (buttonState) {
+      case ButtonState.download:
+        backgroundDownloadTask = DownloadTask(url: "https://file-examples.com/storage/feaade38c1651bd01984236/2017/04/file_example_MP4_1920_18MG.mp4", filename: 'video_file.mp4', directory: 'my/directory', baseDirectory: BaseDirectory.applicationDocuments, updates: Updates.statusAndProgress, allowPause: true, metaData: '<example metaData>');
+        await FileDownloader().enqueue(backgroundDownloadTask!);
+        break;
+      case ButtonState.cancel:
+        // cancel download
+        if (backgroundDownloadTask != null) {
+          await FileDownloader().cancelTasksWithIds([backgroundDownloadTask!.taskId]);
+        }
+        break;
+      case ButtonState.reset:
+        downloadTaskStatus = null;
+        buttonState = ButtonState.download;
+        break;
+      case ButtonState.pause:
+        if (backgroundDownloadTask != null) {
+          await FileDownloader().pause(backgroundDownloadTask!);
+        }
+        break;
+      case ButtonState.resume:
+        if (backgroundDownloadTask != null) {
+          await FileDownloader().resume(backgroundDownloadTask!);
+        }
+        break;
+    }
+    if (mounted) {
+      setState(() {});
+    }
   }
 }
